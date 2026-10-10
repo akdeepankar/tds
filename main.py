@@ -31,6 +31,7 @@ def load_students():
                 })
     return students
 
+@app.get("/")
 @app.get("/api")
 @app.get("/api/")
 def get_students(class_param: Optional[List[str]] = Query(None, alias="class")):
