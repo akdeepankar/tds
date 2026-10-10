@@ -53,11 +53,28 @@ def get_students(request: Request):
 class SentimentRequest(BaseModel):
     sentences: List[str]
 
-# Rule-based fallback sentiment classifier
-HAPPY_WORDS = {"love", "great", "awesome", "excellent", "happy", "good", "wonderful", "fantastic", "enjoy", "like", "best", "amazing", "joy", "delight", "pleased", "positive", "super", "cool", "brilliant", "nice", "top"}
-SAD_WORDS = {"bad", "terrible", "horrible", "sad", "hate", "awful", "disappointed", "worst", "poor", "unhappy", "depressed", "miserable", "angry", "annoyed", "upset", "fail", "failed", "disaster", "sucks", "pain"}
+try:
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    vader_analyzer = SentimentIntensityAnalyzer()
+except Exception:
+    vader_analyzer = None
 
-def classify_rule_based(sentence: str) -> str:
+# Rule-based fallback sentiment classifier
+HAPPY_WORDS = {"love", "great", "awesome", "excellent", "happy", "good", "wonderful", "fantastic", "enjoy", "like", "best", "amazing", "joy", "delight", "pleased", "positive", "super", "cool", "brilliant", "nice", "top", "glad", "satisfied", "fun"}
+SAD_WORDS = {"bad", "terrible", "horrible", "sad", "hate", "awful", "disappointed", "worst", "poor", "unhappy", "depressed", "miserable", "angry", "annoyed", "upset", "fail", "failed", "disaster", "sucks", "pain", "sorry", "regret", "hurt", "broke", "broken"}
+
+def classify_sentence(sentence: str) -> str:
+    if vader_analyzer is not None:
+        scores = vader_analyzer.polarity_scores(sentence)
+        compound = scores["compound"]
+        if compound >= 0.05:
+            return "happy"
+        elif compound <= -0.05:
+            return "sad"
+        else:
+            return "neutral"
+            
+    # Fallback rule-based logic
     words = set(re.findall(r'\w+', sentence.lower()))
     happy_score = len(words.intersection(HAPPY_WORDS))
     sad_score = len(words.intersection(SAD_WORDS))
@@ -69,11 +86,12 @@ def classify_rule_based(sentence: str) -> str:
     else:
         return "neutral"
 
-def classify_with_llm(sentences: List[str]) -> List[str]:
-    api_key = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY") or "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"
-    base_url = os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openrouter/v1")
-    
-    prompt = f"""
+def classify_sentences(sentences: List[str]) -> List[str]:
+    # Try LLM first if API key is present and responds fast
+    api_key = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        base_url = os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openrouter/v1")
+        prompt = f"""
 Analyze the sentiment of each sentence in this list.
 Valid sentiments are EXACTLY one of: "happy", "sad", or "neutral".
 
@@ -86,30 +104,28 @@ Respond ONLY with a JSON object in this format:
 }}
 Ensuring the output list matches the exact order and length of the input.
 """
-    try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
-        response = client.chat.completions.create(
-            model="google/gemini-2.0-flash-lite-001" if "aipipe" in base_url or "openrouter" in base_url else "gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            timeout=10
-        )
-        data = json.loads(response.choices[0].message.content)
-        sentiments = data.get("sentiments", [])
-        if len(sentiments) == len(sentences):
-            # Validate that returned labels are valid
-            valid_set = {"happy", "sad", "neutral"}
-            return [s.lower() if s.lower() in valid_set else classify_rule_based(sentences[i]) for i, s in enumerate(sentiments)]
-    except Exception:
-        pass
-    
-    # Fallback to rule-based classification if LLM is unavailable
-    return [classify_rule_based(s) for s in sentences]
+        try:
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model="google/gemini-2.0-flash-lite-001" if "aipipe" in base_url or "openrouter" in base_url else "gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                timeout=4
+            )
+            data = json.loads(response.choices[0].message.content)
+            sentiments = data.get("sentiments", [])
+            if len(sentiments) == len(sentences):
+                valid_set = {"happy", "sad", "neutral"}
+                return [s.lower() if s.lower() in valid_set else classify_sentence(sentences[i]) for i, s in enumerate(sentiments)]
+        except Exception:
+            pass
+            
+    return [classify_sentence(s) for s in sentences]
 
 @app.post("/sentiment")
 @app.post("/sentiment/")
 def analyze_sentiment(req: SentimentRequest):
-    sentiments = classify_with_llm(req.sentences)
+    sentiments = classify_sentences(req.sentences)
     results = [
         {"sentence": sentence, "sentiment": sentiment}
         for sentence, sentiment in zip(req.sentences, sentiments)
