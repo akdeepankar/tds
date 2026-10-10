@@ -1,7 +1,7 @@
 import os
 import csv
 from typing import List, Optional
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -36,7 +36,8 @@ def load_students():
 @app.get("/api")
 @app.get("/api/")
 @app.get("/")
-def get_students(class_param: Optional[List[str]] = Query(None, alias="class")):
+def get_students(request: Request):
+    class_param = request.query_params.getlist("class")
     students = load_students()
     if class_param:
         selected_classes = set(class_param)
