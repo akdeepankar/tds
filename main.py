@@ -1,9 +1,8 @@
 import os
 import csv
-from typing import List, Optional, Union
+from typing import List, Optional
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 app = FastAPI()
 
@@ -15,31 +14,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-class Student(BaseModel):
-    studentId: int
-    class_: str
-
-    class Config:
-        fields = {'class_': 'class'}
-
 def load_students():
     students = []
-    csv_file = 'students.csv'
+    csv_file = os.path.join(os.path.dirname(__file__), 'students.csv')
     if os.path.exists(csv_file):
         with open(csv_file, mode='r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
                     s_id = int(row['studentId'])
-                except ValueError:
-                    s_id = row['studentId']
+                except (ValueError, KeyError):
+                    s_id = row.get('studentId', '')
                 students.append({
                     "studentId": s_id,
-                    "class": row['class']
+                    "class": row.get('class', '')
                 })
     return students
 
 @app.get("/api")
+@app.get("/api/")
 def get_students(class_param: Optional[List[str]] = Query(None, alias="class")):
     students = load_students()
     if class_param:
