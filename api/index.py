@@ -132,6 +132,163 @@ def analyze_sentiment(req: SentimentRequest):
     ]
     return {"results": results}
 
+
+# --- Code Interpreter Endpoint ---
+class CodeInterpreterRequest(BaseModel):
+    code: str
+
+class ErrorAnalysis(BaseModel):
+    error_lines: List[int]
+
+def execute_python_code(code: str) -> dict:
+    """
+    Execute Python code and return exact output.
+
+    Returns:
+        {
+            "success": bool,
+            "output": str  # Exact stdout or traceback
+        }
+    """
+    import sys
+    from io import StringIO
+    import traceback
+
+    # Capture stdout
+    old_stdout = sys.stdout
+    sys.stdout = StringIO()
+
+    try:
+        # Execute code
+        exec(code)
+        output = sys.stdout.getvalue()
+        return {"success": True, "output": output}
+
+    except Exception as e:
+        # Get full traceback
+        output = traceback.format_exc()
+        return {"success": False, "output": output}
+
+    finally:
+        sys.stdout = old_stdout
+
+def extract_lines_from_traceback(code: str, tb_str: str) -> List[int]:
+    lines = []
+    matches = re.findall(r'File "(?:<string>|<user_code>|<module>|)", line (\d+)', tb_str)
+    if not matches:
+        all_matches = re.findall(r'File ".*?", line (\d+)', tb_str)
+        matches = [m for m in all_matches if "index.py" not in m and "main.py" not in m and "execute_python_code" not in m]
+        if not matches and all_matches:
+            matches = [all_matches[-1]]
+    for m in matches:
+        val = int(m)
+        if val not in lines:
+            lines.append(val)
+    return lines
+
+def analyze_error_with_ai(code: str, tb_str: str) -> List[int]:
+    """
+    Use LLM with structured output to identify error line numbers.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if api_key:
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=api_key)
+
+            prompt = f"""
+Analyze this Python code and its error traceback.
+Identify the line number(s) where the error occurred.
+
+CODE:
+{code}
+
+TRACEBACK:
+{tb_str}
+
+Return the line number(s) where the error is located.
+"""
+
+            response = client.models.generate_content(
+                model='gemini-2.0-flash-exp',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "error_lines": types.Schema(
+                                type=types.Type.ARRAY,
+                                items=types.Schema(type=types.Type.INTEGER)
+                            )
+                        },
+                        required=["error_lines"]
+                    )
+                )
+            )
+
+            result = ErrorAnalysis.model_validate_json(response.text)
+            if result.error_lines:
+                return result.error_lines
+        except Exception as e:
+            print("Gemini API error analysis failed:", e)
+
+    ai_token = os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")
+    if ai_token:
+        try:
+            from openai import OpenAI
+            base_url = os.environ.get("OPENAI_BASE_URL", "https://aipipe.org/openrouter/v1")
+            client = OpenAI(api_key=ai_token, base_url=base_url)
+            prompt = f"""
+Analyze this Python code and its error traceback.
+Identify the line number(s) where the error occurred.
+
+CODE:
+{code}
+
+TRACEBACK:
+{tb_str}
+
+Respond ONLY with a JSON object in this format:
+{{
+  "error_lines": [3]
+}}
+"""
+            resp = client.chat.completions.create(
+                model="google/gemini-2.0-flash-lite-001" if "aipipe" in base_url or "openrouter" in base_url else "gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                timeout=5
+            )
+            data = json.loads(resp.choices[0].message.content)
+            if "error_lines" in data and isinstance(data["error_lines"], list):
+                return [int(x) for x in data["error_lines"]]
+        except Exception as e:
+            print("Secondary LLM error analysis failed:", e)
+
+    return extract_lines_from_traceback(code, tb_str)
+
+@app.post("/code-interpreter")
+@app.post("/code-interpreter/")
+@app.post("/api/code-interpreter")
+@app.post("/api/code-interpreter/")
+def code_interpreter(req: CodeInterpreterRequest):
+    res = execute_python_code(req.code)
+    if res["success"]:
+        return {
+            "error": [],
+            "result": res["output"]
+        }
+    else:
+        error_lines = analyze_error_with_ai(req.code, res["output"])
+        return {
+            "error": error_lines,
+            "result": res["output"]
+        }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
